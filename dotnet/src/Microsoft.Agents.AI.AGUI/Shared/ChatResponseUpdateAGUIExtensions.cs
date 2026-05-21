@@ -449,7 +449,6 @@ internal static class ChatResponseUpdateAGUIExtensions
 
         string? currentMessageId = null;
         string? streamingMessageId = null;
-        string? currentReasoningBaseId = null;
         string? currentReasoningId = null;
         string? currentReasoningMessageId = null;
         await foreach (var chatResponse in updates.WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -465,7 +464,7 @@ internal static class ChatResponseUpdateAGUIExtensions
 
             if (chatResponse is { Contents.Count: > 0 } &&
                 chatResponse.Contents[0] is TextContent &&
-                !string.Equals(currentMessageId, chatResponse.MessageId, StringComparison.Ordinal))
+                currentMessageId is null)
             {
                 // Close any open reasoning block before opening a text message, so AG-UI
                 // events are properly bracketed. MEAI providers share one MessageId across
@@ -481,7 +480,6 @@ internal static class ChatResponseUpdateAGUIExtensions
                     {
                         MessageId = currentReasoningId!
                     };
-                    currentReasoningBaseId = null;
                     currentReasoningId = null;
                     currentReasoningMessageId = null;
                 }
@@ -523,6 +521,17 @@ internal static class ChatResponseUpdateAGUIExtensions
                 {
                     if (content is FunctionCallContent functionCallContent)
                     {
+                        // Close any open text message before emitting tool events.
+                        if (currentMessageId is not null)
+                        {
+                            yield return new TextMessageEndEvent
+                            {
+                                MessageId = currentMessageId
+                            };
+                            currentMessageId = null;
+                            streamingMessageId = null;
+                        }
+
                         // Close any open reasoning block before emitting tool events.
                         if (currentReasoningMessageId is not null)
                         {
@@ -534,7 +543,6 @@ internal static class ChatResponseUpdateAGUIExtensions
                             {
                                 MessageId = currentReasoningId!
                             };
-                            currentReasoningBaseId = null;
                             currentReasoningId = null;
                             currentReasoningMessageId = null;
                         }
@@ -561,6 +569,17 @@ internal static class ChatResponseUpdateAGUIExtensions
                     }
                     else if (content is FunctionResultContent functionResultContent)
                     {
+                        // Close any open text message before emitting tool result events.
+                        if (currentMessageId is not null)
+                        {
+                            yield return new TextMessageEndEvent
+                            {
+                                MessageId = currentMessageId
+                            };
+                            currentMessageId = null;
+                            streamingMessageId = null;
+                        }
+
                         // Close any open reasoning block before emitting tool result events.
                         if (currentReasoningMessageId is not null)
                         {
@@ -572,7 +591,6 @@ internal static class ChatResponseUpdateAGUIExtensions
                             {
                                 MessageId = currentReasoningId!
                             };
-                            currentReasoningBaseId = null;
                             currentReasoningId = null;
                             currentReasoningMessageId = null;
                         }
@@ -588,21 +606,8 @@ internal static class ChatResponseUpdateAGUIExtensions
                     else if (content is TextReasoningContent reasoningContent
                         && (!string.IsNullOrEmpty(reasoningContent.Text) || !string.IsNullOrEmpty(reasoningContent.ProtectedData)))
                     {
-                        if (!string.Equals(currentReasoningBaseId, chatResponse.MessageId, StringComparison.Ordinal))
+                        if (currentReasoningMessageId is null)
                         {
-                            if (currentReasoningMessageId is not null)
-                            {
-                                yield return new ReasoningMessageEndEvent
-                                {
-                                    MessageId = currentReasoningMessageId
-                                };
-                                yield return new ReasoningEndEvent
-                                {
-                                    MessageId = currentReasoningId!
-                                };
-                            }
-
-                            currentReasoningBaseId = chatResponse.MessageId;
                             currentReasoningId = Guid.NewGuid().ToString("N");
                             currentReasoningMessageId = Guid.NewGuid().ToString("N");
 

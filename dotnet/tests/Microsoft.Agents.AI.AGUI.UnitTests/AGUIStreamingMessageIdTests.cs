@@ -237,6 +237,85 @@ public sealed class AGUIStreamingMessageIdTests
     }
 
     /// <summary>
+    /// When a provider emits a different completion ID on every streamed chunk (e.g. GPT-5.4 mini),
+    /// the AGUI encoder must still produce exactly one TEXT_MESSAGE_START/END pair for the whole
+    /// text segment rather than one pair per token.
+    /// </summary>
+    [Fact]
+    public async Task TextStreaming_FreshMessageIdPerChunk_ProducesSingleTextMessageAsync()
+    {
+        // Arrange — each chunk carries a unique completion ID, as some models do
+        List<ChatResponseUpdate> providerUpdates =
+        [
+            new ChatResponseUpdate(ChatRole.Assistant, "Hello") { MessageId = "chatcmpl-001" },
+            new ChatResponseUpdate(ChatRole.Assistant, " world") { MessageId = "chatcmpl-002" },
+            new ChatResponseUpdate(ChatRole.Assistant, "!") { MessageId = "chatcmpl-003" }
+        ];
+
+        // Act
+        List<BaseEvent> aguiEvents = [];
+        await foreach (BaseEvent evt in providerUpdates.ToAsyncEnumerableAsync()
+            .AsAGUIEventStreamAsync("thread-1", "run-1", AGUIJsonSerializerContext.Default.Options))
+        {
+            aguiEvents.Add(evt);
+        }
+
+        // Assert — exactly one TEXT_MESSAGE_START / END pair despite changing IDs
+        List<TextMessageStartEvent> startEvents = aguiEvents.OfType<TextMessageStartEvent>().ToList();
+        List<TextMessageEndEvent> endEvents = aguiEvents.OfType<TextMessageEndEvent>().ToList();
+        List<TextMessageContentEvent> contentEvents = aguiEvents.OfType<TextMessageContentEvent>().ToList();
+
+        Assert.Single(startEvents);
+        Assert.Single(endEvents);
+        Assert.Equal(startEvents[0].MessageId, endEvents[0].MessageId);
+
+        Assert.Equal(3, contentEvents.Count);
+        Assert.All(contentEvents, e => Assert.Equal(startEvents[0].MessageId, e.MessageId));
+    }
+
+    /// <summary>
+    /// When a provider emits a fresh ID per chunk across text → tool call → text, the encoder
+    /// must produce two separate text messages (one before the tool call, one after) and not
+    /// collapse the second text segment into the first.
+    /// </summary>
+    [Fact]
+    public async Task TextToolText_FreshMessageIdPerChunk_ProducesTwoSeparateTextMessagesAsync()
+    {
+        FunctionCallContent functionCall = new("call_1", "GetWeather")
+        {
+            Arguments = new Dictionary<string, object?> { ["location"] = "Seattle" }
+        };
+
+        List<ChatResponseUpdate> providerUpdates =
+        [
+            new ChatResponseUpdate(ChatRole.Assistant, "Let me check.") { MessageId = "chatcmpl-001" },
+            new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = [functionCall], MessageId = "chatcmpl-002" },
+            new ChatResponseUpdate(ChatRole.Tool, [new FunctionResultContent("call_1", "Rainy")]) { MessageId = "chatcmpl-003" },
+            new ChatResponseUpdate(ChatRole.Assistant, "It is rainy.") { MessageId = "chatcmpl-004" }
+        ];
+
+        // Act
+        List<BaseEvent> aguiEvents = [];
+        await foreach (BaseEvent evt in providerUpdates.ToAsyncEnumerableAsync()
+            .AsAGUIEventStreamAsync("thread-1", "run-1", AGUIJsonSerializerContext.Default.Options))
+        {
+            aguiEvents.Add(evt);
+        }
+
+        // Assert — two distinct text messages
+        List<TextMessageStartEvent> startEvents = aguiEvents.OfType<TextMessageStartEvent>().ToList();
+        List<TextMessageEndEvent> endEvents = aguiEvents.OfType<TextMessageEndEvent>().ToList();
+
+        Assert.Equal(2, startEvents.Count);
+        Assert.Equal(2, endEvents.Count);
+        Assert.NotEqual(startEvents[0].MessageId, startEvents[1].MessageId);
+
+        // Each end event must close its own start event
+        Assert.Equal(startEvents[0].MessageId, endEvents[0].MessageId);
+        Assert.Equal(startEvents[1].MessageId, endEvents[1].MessageId);
+    }
+
+    /// <summary>
     /// When a provider properly sets MessageId (e.g., OpenAI), the AGUI pipeline
     /// produces valid events with correct messageId values.
     /// </summary>
